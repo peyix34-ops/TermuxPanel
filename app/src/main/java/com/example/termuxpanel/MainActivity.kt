@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.widget.ArrayAdapter
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
@@ -25,8 +26,10 @@ class MainActivity : Activity() {
     private val callbacks = HashMap<Int, (String) -> Unit>()
     private var nextId = 1
     private val items = ArrayList<String>()
+    private var scriptMode = true
     private lateinit var adapter: ArrayAdapter<String>
     private lateinit var status: TextView
+    private lateinit var toggle: Button
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -43,11 +46,25 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun q(s: String): String = "'" + s.replace("'", "'\\''") + "'"
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.setPadding(32, 64, 32, 32)
+
+        toggle = Button(this)
+        toggle.text = "Paketlere gec"
+        toggle.setOnClickListener {
+            scriptMode = !scriptMode
+            toggle.text = if (scriptMode) "Paketlere gec" else "Scriptlere gec"
+            items.clear()
+            adapter.notifyDataSetChanged()
+            status.text = "Yukleniyor..."
+            refresh()
+        }
+
         status = TextView(this)
         status.textSize = 16f
         status.text = "Yukleniyor..."
@@ -59,6 +76,7 @@ class MainActivity : Activity() {
             confirmDelete(items[pos])
             true
         }
+        root.addView(toggle)
         root.addView(status)
         root.addView(list)
         setContentView(root)
@@ -111,30 +129,55 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
-        termux("apt-mark showmanual 2>/dev/null | sort", true) { out ->
-            val names = out.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.contains(" ") }
-            items.clear()
-            items.addAll(names)
-            adapter.notifyDataSetChanged()
-            status.text = items.size.toString() + " arac | tikla: calistir | uzun bas: sil"
+        val wasScript = scriptMode
+        val cmd = if (wasScript) {
+            """cd ~ && find . -maxdepth 3 -type f \( -name '*.py' -o -name '*.sh' -o -name '*.js' \) -not -path '*/.*' -not -path '*/node_modules/*' -not -path '*/site-packages/*' | sort"""
+        } else {
+            "apt-mark showmanual 2>/dev/null | sort"
+        }
+        termux(cmd, true) { out ->
+            if (wasScript == scriptMode) {
+                val names = out.lines()
+                    .map { it.trim().removePrefix("./") }
+                    .filter { it.isNotEmpty() && (wasScript || !it.contains(" ")) }
+                items.clear()
+                items.addAll(names)
+                adapter.notifyDataSetChanged()
+                status.text = items.size.toString() + " ogе | tikla: calistir | uzun bas: sil"
+            }
         }
     }
 
     private fun runTool(name: String) {
-        val script = "if command -v $name >/dev/null 2>&1; then $name; " +
-            "else b=\$(dpkg -L $name 2>/dev/null | grep '/usr/bin/' | head -1); " +
-            "if [ -n \"\$b\" ]; then \"\$b\"; else echo 'Calistirilabilir dosya yok'; fi; fi; " +
-            "echo; exec bash"
-        termux(script, false)
+        if (scriptMode) {
+            val dir = name.substringBeforeLast('/', "")
+            val file = name.substringAfterLast('/')
+            val interp = when (file.substringAfterLast('.', "")) {
+                "py" -> "python"
+                "js" -> "node"
+                else -> "bash"
+            }
+            val cd = if (dir.isEmpty()) "cd ~" else "cd ~/" + q(dir)
+            termux(cd + " && " + interp + " " + q(file) + "; echo; exec bash", false)
+        } else {
+            val script = "if command -v $name >/dev/null 2>&1; then $name; " +
+                "else echo 'Calistirilabilir dosya yok'; fi; echo; exec bash"
+            termux(script, false)
+        }
     }
 
     private fun confirmDelete(name: String) {
         AlertDialog.Builder(this)
             .setTitle("Sil")
-            .setMessage(name + " Termux'tan silinsin mi?")
+            .setMessage(name + " silinsin mi?")
             .setPositiveButton("Sil") { _, _ ->
                 status.text = name + " siliniyor..."
-                termux("apt remove -y $name 2>&1", true) { refresh() }
+                val cmd = if (scriptMode) {
+                    "cd ~ && rm -f " + q(name)
+                } else {
+                    "apt remove -y $name 2>&1"
+                }
+                termux(cmd, true) { refresh() }
             }
             .setNegativeButton("Iptal", null)
             .show()
